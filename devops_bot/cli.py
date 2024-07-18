@@ -64,8 +64,7 @@ def login():
         token = response.json().get('token')
         if token:
             save_token(token)
-            click.echo("Login successful! Use the token below to log in to the UI:")
-            click.echo(token)
+            click.echo("Login successful!")
             verify_token(username, token)
         else:
             click.echo("Failed to retrieve token.")
@@ -73,7 +72,6 @@ def login():
         click.echo("Invalid username or password")
 
 def verify_token(username, token):
-    """Verify the token with the UI and confirm the connection."""
     for _ in range(12):  # 1 minute with 5-second intervals
         response = requests.post(f"{API_BASE_URL}/verify_token", json={"username": username, "token": token})
         if response.status_code == 200:
@@ -86,8 +84,7 @@ def verify_token(username, token):
 @click.argument('resource_type')
 @click.argument('manifest_type', required=False)
 @click.option('--params', type=str, help="Parameters for the resource, in key=value format, separated by spaces.")
-@click.option('--output', type=click.Path(), help="Path to save the generated file.")
-def create(resource_type, manifest_type, params, output):
+def create(resource_type, manifest_type, params):
     """Generate configuration files."""
     token = load_token()
     if not token:
@@ -106,13 +103,9 @@ def create(resource_type, manifest_type, params, output):
 
     if response.status_code == 200:
         click.echo(response.json().get('message'))
-        generated_data = response.json().get('data')
-        if output:
-            with open(output, 'w') as file:
-                file.write(generated_data)
-            click.echo(f"Generated data saved to {output}")
-        else:
-            click.echo(generated_data)
+        with open(f"{resource_type}_{manifest_type}.yaml", "w") as f:
+            f.write(response.json().get('data'))
+        click.echo(f"{resource_type}_{manifest_type}.yaml file has been generated and saved.")
     else:
         click.echo("Failed to generate file.")
         click.echo(response.json().get('message'))

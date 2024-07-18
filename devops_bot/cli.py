@@ -2,9 +2,11 @@ import click
 import os
 import json
 import requests
+import jwt
+import time
 import yaml
 
-API_BASE_URL = "http://192.168.56.41:8000/api"
+API_BASE_URL = "http://192.168.56.41:5000/api"
 
 def save_token(token):
     with open(os.path.expanduser("~/.devops_bot_token"), "w") as token_file:
@@ -62,17 +64,30 @@ def login():
         token = response.json().get('token')
         if token:
             save_token(token)
-            click.echo("Login successful!")
+            click.echo("Login successful! Use the token below to log in to the UI:")
+            click.echo(token)
+            verify_token(username, token)
         else:
             click.echo("Failed to retrieve token.")
     else:
         click.echo("Invalid username or password")
 
+def verify_token(username, token):
+    """Verify the token with the UI and confirm the connection."""
+    for _ in range(12):  # 1 minute with 5-second intervals
+        response = requests.post(f"{API_BASE_URL}/verify_token", json={"username": username, "token": token})
+        if response.status_code == 200:
+            click.echo(f"Token verified successfully for {username}.")
+            return
+        time.sleep(5)
+    click.echo("Token verification failed.")
+
 @cli.command(help="Generate configuration files.")
 @click.argument('resource_type')
 @click.argument('manifest_type', required=False)
 @click.option('--params', type=str, help="Parameters for the resource, in key=value format, separated by spaces.")
-def create(resource_type, manifest_type, params):
+@click.option('--output', type=click.Path(), help="Path to save the generated file.")
+def create(resource_type, manifest_type, params, output):
     """Generate configuration files."""
     token = load_token()
     if not token:
@@ -91,12 +106,19 @@ def create(resource_type, manifest_type, params):
 
     if response.status_code == 200:
         click.echo(response.json().get('message'))
-        click.echo(response.json().get('data'))
+        generated_data = response.json().get('data')
+        if output:
+            with open(output, 'w') as file:
+                file.write(generated_data)
+            click.echo(f"Generated data saved to {output}")
+        else:
+            click.echo(generated_data)
     else:
         click.echo("Failed to generate file.")
         click.echo(response.json().get('message'))
 
 if __name__ == '__main__':
     cli()
+
 
 

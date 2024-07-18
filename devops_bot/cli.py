@@ -22,30 +22,26 @@ def cli():
     """DevOps Bot CLI."""
     pass
 
-@cli.command()
+@cli.command(help="Greet the user.")
 def greet():
-    """Greet the user."""
     click.echo("Hello from DevOps Bot!")
 
-@cli.command()
+@cli.command(help="Show version information.")
 def version():
-    """Show version information."""
     click.echo("devops-bot, version 0.1")
 
-@cli.command()
+@cli.command(help="Create a directory at the specified path.")
 @click.argument('path')
 def mkdir(path):
-    """Create a directory at the specified path."""
     try:
         os.makedirs(path, exist_ok=True)
         click.echo(f"Directory '{path}' created successfully.")
     except Exception as e:
         click.echo(f"Failed to create directory '{path}': {e}")
 
-@cli.command()
+@cli.command(help="Solve an issue using the knowledge base.")
 @click.argument('issue')
 def solve(issue):
-    """Solve an issue using the knowledge base."""
     try:
         with open(os.path.join(os.path.dirname(__file__), 'knowledge_base.json'), 'r') as file:
             knowledge_base = json.load(file)
@@ -57,11 +53,10 @@ def solve(issue):
     except Exception as e:
         click.echo(f"Failed to solve issue '{issue}': {e}")
 
-@cli.command()
-@click.argument('username')
-@click.argument('password')
-def login(username, password):
-    """Login to the DevOps Bot."""
+@cli.command(help="Login to the DevOps Bot.")
+def login():
+    username = click.prompt('Enter your username')
+    password = click.prompt('Enter your password', hide_input=True)
     response = requests.post(f"{API_BASE_URL}/login", json={"username": username, "password": password})
     if response.status_code == 200:
         token = response.json().get('token')
@@ -73,10 +68,11 @@ def login(username, password):
     else:
         click.echo("Invalid username or password")
 
-@cli.command()
+@cli.command(help="Generate configuration files.")
 @click.argument('resource_type')
-@click.argument('data', type=click.File('rb'))
-def generate(resource_type, data):
+@click.argument('manifest_type', required=False)
+@click.option('--params', type=str, help="Parameters for the resource, in key=value format, separated by spaces.")
+def create(resource_type, manifest_type, params):
     """Generate configuration files."""
     token = load_token()
     if not token:
@@ -84,7 +80,14 @@ def generate(resource_type, data):
         return
 
     headers = {'Authorization': token}
-    response = requests.post(f"{API_BASE_URL}/generate/{resource_type}", headers=headers, json={"data": data.read()})
+    data = {}
+
+    if params:
+        for param in params.split():
+            key, value = param.split('=')
+            data[key] = value
+
+    response = requests.post(f"{API_BASE_URL}/generate/{resource_type}/{manifest_type}", headers=headers, json=data)
 
     if response.status_code == 200:
         click.echo(response.json().get('message'))
@@ -93,133 +96,7 @@ def generate(resource_type, data):
         click.echo("Failed to generate file.")
         click.echo(response.json().get('message'))
 
-@cli.command()
-@click.argument('type', type=click.Choice(['k8s', 'dockerfile', 'ansible', 'terraform']))
-@click.argument('manifest_type', required=False)
-@click.option('--params', type=str, help="Parameters for the manifest.")
-def create(type, manifest_type, params):
-    """Create various DevOps manifests.
-
-    TYPE: The type of resource to create. Choices are: k8s, dockerfile, ansible, terraform.
-    
-    MANIFEST_TYPE: For k8s, specify the kind of Kubernetes resource (e.g., Deployment, Service).
-    
-    --params: Parameters for the manifest in the form 'key=value key2=value2 ...'.
-    
-    Examples:
-    devops-bot create k8s Deployment --params "name=mydeployment image=nginx replicas=3 volume=myvol"
-    devops-bot create dockerfile --params "base_image=node version=14 install_command=npm install start_command=node app.js"
-    devops-bot create ansible --params "package=name=nginx state=present service=name=nginx state=started"
-    devops-bot create terraform --params "resource_type=aws_instance resource_name=myinstance ami=ami-12345678 instance_type=t2.micro"
-    """
-    if type == 'k8s':
-        create_k8s_manifest(manifest_type, params)
-    elif type == 'dockerfile':
-        create_dockerfile(params)
-    elif type == 'ansible':
-        create_ansible_playbook(params)
-    elif type == 'terraform':
-        create_terraform_config(params)
-    else:
-        click.echo("Invalid type specified.")
-
-def create_k8s_manifest(manifest_type, params):
-    if not manifest_type or not params:
-        click.echo("For k8s, both manifest_type and params are required.")
-        return
-    
-    params_dict = dict(param.split('=') for param in params.split())
-    
-    manifest = {}
-    if manifest_type == 'Deployment':
-        manifest = {
-            'apiVersion': 'apps/v1',
-            'kind': 'Deployment',
-            'metadata': {'name': params_dict.get('name')},
-            'spec': {
-                'replicas': int(params_dict.get('replicas')),
-                'selector': {'matchLabels': {'app': params_dict.get('name')}},
-                'template': {
-                    'metadata': {'labels': {'app': params_dict.get('name')}},
-                    'spec': {
-                        'containers': [{
-                            'name': params_dict.get('name'),
-                            'image': params_dict.get('image')
-                        }]
-                    }
-                }
-            }
-        }
-        if 'volume' in params_dict:
-            manifest['spec']['template']['spec']['volumes'] = [{'name': params_dict.get('volume')}]
-    # Add more conditions for other k8s resources
-    click.echo(yaml.dump(manifest))
-
-def create_dockerfile(params):
-    if not params:
-        click.echo("Parameters are required for dockerfile.")
-        return
-    
-    params_dict = dict(param.split('=') for param in params.split())
-    base_image = params_dict.get('base_image')
-    version = params_dict.get('version')
-    dockerfile_content = f"FROM {base_image}:{version}\n"
-    
-    if base_image in ["node", "python", "golang", "java"]:
-        dockerfile_content += f"""
-WORKDIR /usr/src/app
-COPY . .
-RUN {params_dict.get('install_command')}
-CMD ["{params_dict.get('start_command')}"]
-"""
-    elif base_image == "nginx":
-        dockerfile_content += f"""
-COPY {params_dict.get('config_file')} /etc/nginx/nginx.conf
-COPY {params_dict.get('document_root')} /usr/share/nginx/html
-"""
-    elif base_image == "alpine":
-        dockerfile_content += f"""
-RUN {params_dict.get('commands')}
-"""
-    
-    click.echo(dockerfile_content)
-
-def create_ansible_playbook(params):
-    if not params:
-        click.echo("Parameters are required for ansible playbook.")
-        return
-    
-    params_dict = dict(param.split('=') for param in params.split())
-    tasks = []
-    
-    for task_name, task_params in params_dict.items():
-        task_params_dict = dict(param.split('=') for param in task_params.split(','))
-        tasks.append({task_name: task_params_dict})
-    
-    playbook = {
-        'hosts': 'all',
-        'tasks': tasks
-    }
-    
-    click.echo(yaml.dump(playbook))
-
-def create_terraform_config(params):
-    if not params:
-        click.echo("Parameters are required for terraform configuration.")
-        return
-    
-    params_dict = dict(param.split('=') for param in params.split())
-    resource_type = params_dict.get('resource_type')
-    resource_name = params_dict.get('resource_name')
-    resource_params = {k: v for k, v in params_dict.items() if k not in ['resource_type', 'resource_name']}
-    
-    terraform_config = f"""
-resource "{resource_type}" "{resource_name}" {{
-    {json.dumps(resource_params, indent=4).replace('{', '').replace('}', '').replace('"', '')}
-}}
-"""
-    click.echo(terraform_config)
-
 if __name__ == '__main__':
     cli()
+
 

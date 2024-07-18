@@ -6,7 +6,7 @@ import jwt
 import time
 import yaml
 
-API_BASE_URL = "http://192.168.56.41:8000/api"
+API_BASE_URL = "http://192.168.56.41:8000"
 
 def save_token(token):
     with open(os.path.expanduser("~/.devops_bot_token"), "w") as token_file:

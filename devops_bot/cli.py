@@ -2,7 +2,6 @@ import click
 import os
 import json
 import requests
-import jwt
 import time
 
 API_BASE_URL = "https://devopsbot-testserver.online"
@@ -90,7 +89,7 @@ def create(resource_type, manifest_type, params):
         click.echo("No token found. Please log in first.")
         return
 
-    headers = {'Authorization': token}
+    headers = {'Authorization': token, 'Content-Type': 'application/json'}
     data = {}
 
     if params:
@@ -111,6 +110,7 @@ def create(resource_type, manifest_type, params):
 
 if __name__ == '__main__':
     cli()
+
 
 
 

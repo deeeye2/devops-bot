@@ -57,7 +57,7 @@ def solve(issue):
 def login():
     username = click.prompt('Enter your username')
     password = click.prompt('Enter your password', hide_input=True)
-    response = requests.post(f"{API_BASE_URL}/api/login", json={"username": username, "password": password})
+    response = requests.post(f"{API_BASE_URL}/api/login", headers={'Content-Type': 'application/json'}, json={"username": username, "password": password})
     if response.status_code == 200:
         token = response.json().get('token')
         if token:
@@ -71,7 +71,7 @@ def login():
 
 def verify_token(username, token):
     for _ in range(12):  # 1 minute with 5-second intervals
-        response = requests.post(f"{API_BASE_URL}/api/verify_token", json={"username": username, "token": token})
+        response = requests.post(f"{API_BASE_URL}/api/verify_token", headers={'Content-Type': 'application/json'}, json={"username": username, "token": token})
         if response.status_code == 200:
             click.echo(f"Token verified successfully for {username}.")
             return
@@ -110,6 +110,7 @@ def create(resource_type, manifest_type, params):
 
 if __name__ == '__main__':
     cli()
+
 
 
 

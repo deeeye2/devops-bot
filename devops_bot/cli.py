@@ -89,7 +89,7 @@ def create(resource_type, manifest_type, params):
         click.echo("No token found. Please log in first.")
         return
 
-    headers = {'Authorization': token, 'Content-Type': 'application/json'}
+    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
     data = {}
 
     if params:

@@ -4,9 +4,8 @@ import json
 import requests
 import jwt
 import time
-import yaml
 
-API_BASE_URL = "https://devopsbot-testserver.online/"
+API_BASE_URL = "https://devopsbot-testserver.online"
 
 def save_token(token):
     with open(os.path.expanduser("~/.devops_bot_token"), "w") as token_file:
@@ -35,7 +34,6 @@ def version():
 @cli.command(help="Create a directory at the specified path.")
 @click.argument('path')
 def mkdir(path):
-    """Create a directory at the specified PATH."""
     try:
         os.makedirs(path, exist_ok=True)
         click.echo(f"Directory '{path}' created successfully.")
@@ -45,7 +43,6 @@ def mkdir(path):
 @cli.command(help="Solve an issue using the knowledge base.")
 @click.argument('issue')
 def solve(issue):
-    """Solve an ISSUE using the knowledge base."""
     try:
         with open(os.path.join(os.path.dirname(__file__), 'knowledge_base.json'), 'r') as file:
             knowledge_base = json.load(file)
@@ -59,7 +56,6 @@ def solve(issue):
 
 @cli.command(help="Login to the DevOps Bot.")
 def login():
-    """Login to the DevOps Bot."""
     username = click.prompt('Enter your username')
     password = click.prompt('Enter your password', hide_input=True)
     response = requests.post(f"{API_BASE_URL}/api/login", json={"username": username, "password": password})
@@ -67,7 +63,7 @@ def login():
         token = response.json().get('token')
         if token:
             save_token(token)
-            click.echo("Login successful!")
+            click.echo(f"Login successful! Your token is: {token}")
             verify_token(username, token)
         else:
             click.echo("Failed to retrieve token.")
@@ -75,7 +71,6 @@ def login():
         click.echo("Invalid username or password")
 
 def verify_token(username, token):
-    """Verify the token for the specified USERNAME."""
     for _ in range(12):  # 1 minute with 5-second intervals
         response = requests.post(f"{API_BASE_URL}/api/verify_token", json={"username": username, "token": token})
         if response.status_code == 200:
@@ -89,7 +84,7 @@ def verify_token(username, token):
 @click.argument('manifest_type', required=False)
 @click.option('--params', type=str, help="Parameters for the resource, in key=value format, separated by spaces.")
 def create(resource_type, manifest_type, params):
-    """Generate configuration files for the specified RESOURCE_TYPE and MANIFEST_TYPE."""
+    """Generate configuration files."""
     token = load_token()
     if not token:
         click.echo("No token found. Please log in first.")

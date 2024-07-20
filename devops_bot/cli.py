@@ -100,10 +100,14 @@ def create(resource_type, manifest_type, params):
     response = requests.post(f"{API_BASE_URL}/generate/{resource_type}/{manifest_type}", headers=headers, json=data)
 
     if response.status_code == 200:
-        click.echo(response.json().get('message'))
-        with open(f"{resource_type}_{manifest_type}.yaml", "w") as f:
-            f.write(response.json().get('data'))
-        click.echo(f"{resource_type}_{manifest_type}.yaml file has been generated and saved.")
+        response_data = response.json()
+        if 'data' in response_data:
+            yaml_content = response_data['data']
+            with open(f"{resource_type}_{manifest_type}.yaml", "w") as f:
+                f.write(yaml_content)
+            click.echo(f"{resource_type}_{manifest_type}.yaml file has been generated and saved.")
+        else:
+            click.echo("Unexpected response format.")
     else:
         click.echo("Failed to generate file.")
         click.echo(response.json().get('message'))

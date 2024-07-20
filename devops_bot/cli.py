@@ -3,6 +3,7 @@ import os
 import json
 import requests
 import time
+import boto3
 
 API_BASE_URL = "https://devopsbot-testserver.online"
 
@@ -14,6 +15,21 @@ def load_token():
     try:
         with open(os.path.expanduser("~/.devops_bot_token"), "r") as token_file:
             return token_file.read().strip()
+    except FileNotFoundError:
+        return None
+
+def save_aws_credentials(access_key, secret_key):
+    credentials = {
+        'aws_access_key_id': access_key,
+        'aws_secret_access_key': secret_key
+    }
+    with open(os.path.expanduser("~/.aws_credentials"), "w") as cred_file:
+        json.dump(credentials, cred_file)
+
+def load_aws_credentials():
+    try:
+        with open(os.path.expanduser("~/.aws_credentials"), "r") as cred_file:
+            return json.load(cred_file)
     except FileNotFoundError:
         return None
 
@@ -111,6 +127,33 @@ def create(resource_type, manifest_type, params):
     else:
         click.echo("Failed to generate file.")
         click.echo(response.json().get('message'))
+
+@cli.command(help="Create an AWS instance.")
+@click.option('--params', required=True, help='Parameters for the AWS instance (e.g., "image_id=ami-0abcdef1234567890 instance_type=t2.micro")')
+def create_aws_instance(params):
+    aws_credentials = load_aws_credentials()
+    if not aws_credentials:
+        click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
+        return
+
+    params_dict = dict(param.split('=') for param in params.split())
+    try:
+        ec2 = boto3.client('ec2', **aws_credentials)
+        response = ec2.run_instances(
+            ImageId=params_dict.get('image_id'),
+            InstanceType=params_dict.get('instance_type'),
+            MinCount=1,
+            MaxCount=1
+        )
+        instance_id = response['Instances'][0]['InstanceId']
+        click.echo(f"Instance created successfully: {instance_id}")
+    except NoCredentialsError:
+        click.echo("AWS credentials not found.")
+    except PartialCredentialsError:
+        click.echo("Incomplete AWS credentials.")
+    except Exception as e:
+        click.echo(f"Error creating instance: {e}")
+
 
 if __name__ == '__main__':
     cli()

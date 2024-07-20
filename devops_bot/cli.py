@@ -18,10 +18,11 @@ def load_token():
     except FileNotFoundError:
         return None
 
-def save_aws_credentials(access_key, secret_key):
+def save_aws_credentials(access_key, secret_key, region):
     credentials = {
         'aws_access_key_id': access_key,
-        'aws_secret_access_key': secret_key
+        'aws_secret_access_key': secret_key,
+        'region_name': region
     }
     with open(os.path.expanduser("~/.aws_credentials"), "w") as cred_file:
         json.dump(credentials, cred_file)
@@ -32,6 +33,7 @@ def load_aws_credentials():
             return json.load(cred_file)
     except FileNotFoundError:
         return None
+
 
 @click.group()
 def cli():
@@ -128,9 +130,67 @@ def create(resource_type, manifest_type, params):
         click.echo("Failed to generate file.")
         click.echo(response.json().get('message'))
 
-@cli.command(help="Create an AWS instance.")
+@cli.command(help="Configure AWS credentials.")
+@click.option('--aws_access_key_id', required=True, help="AWS Access Key ID")
+@click.option('--aws_secret_access_key', required=True, help="AWS Secret Access Key")
+@click.option('--region', required=True, help="AWS Region")
+def configure_aws(aws_access_key_id, aws_secret_access_key, region):
+    save_aws_credentials(aws_access_key_id, aws_secret_access_key, region)
+    click.echo("AWS credentials configured successfully.")
+
+@cli.command(help="Create AWS instances.")
 @click.option('--params', required=True, help='Parameters for the AWS instance (e.g., "image_id=ami-0abcdef1234567890 instance_type=t2.micro")')
-def create_aws_instance(params):
+@click.option('--count', default=1, help="Number of instances to create")
+@click.option('--tag1', help='First tag for the instances (e.g., "Key1=Value1")')
+@click.option('--tag2', help='Second tag for the instances (e.g., "Key2=Value2")')
+@click.option('--tag3', help='Third tag for the instances (e.g., "Key3=Value3")')
+@click.option('--tag4', help='Fourth tag for the instances (e.g., "Key4=Value4")')
+@click.option('--tag5', help='Fifth tag for the instances (e.g., "Key5=Value5")')
+@click.option('--security_group', help='Security group for the instances')
+@click.option('--key_name', help='Key pair name for the instances')
+def create_aws_instance(params, count, tag1, tag2, tag3, tag4, tag5, security_group, key_name):
+    aws_credentials = load_aws_credentials()
+    if not aws_credentials:
+        click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
+        return
+
+    params_dict = dict(param.split('=') for param in params.split())
+    tags = [tag1, tag2, tag3, tag4, tag5]
+    tags_list = [{'Key': tag.split('=')[0], 'Value': tag.split('=')[1]} for tag in tags if tag]
+    tag_specifications = [{'ResourceType': 'instance', 'Tags': tags_list}] if tags_list else []
+
+    try:
+        ec2 = boto3.client('ec2', **aws_credentials)
+        run_instances_params = {
+            'ImageId': params_dict.get('image_id'),
+            'InstanceType': params_dict.get('instance_type'),
+            'MinCount': count,
+            'MaxCount': count,
+            'TagSpecifications': tag_specifications if tag_specifications else None
+        }
+        if security_group:
+            run_instances_params['SecurityGroupIds'] = [security_group]
+        if key_name:
+            run_instances_params['KeyName'] = key_name
+
+        response = ec2.run_instances(**run_instances_params)
+        instance_ids = [instance['InstanceId'] for instance in response['Instances']]
+        click.echo(f"Instances created successfully: {', '.join(instance_ids)}")
+    except NoRegionError:
+        click.echo("You must specify a region.")
+    except NoCredentialsError:
+        click.echo("AWS credentials not found.")
+    except PartialCredentialsError:
+        click.echo("Incomplete AWS credentials.")
+    except Exception as e:
+        click.echo(f"Error creating instances: {e}")
+
+
+# Section Added: Create Multiple AWS Instances
+@cli.command(help="Create multiple AWS instances.")
+@click.option('--params', required=True, help='Parameters for the AWS instance (e.g., "image_id=ami-0abcdef1234567890 instance_type=t2.micro")')
+@click.option('--count', default=1, help="Number of instances to create")
+def create_multiple_aws_instances(params, count):
     aws_credentials = load_aws_credentials()
     if not aws_credentials:
         click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
@@ -142,18 +202,134 @@ def create_aws_instance(params):
         response = ec2.run_instances(
             ImageId=params_dict.get('image_id'),
             InstanceType=params_dict.get('instance_type'),
-            MinCount=1,
-            MaxCount=1
+            MinCount=count,
+            MaxCount=count
         )
-        instance_id = response['Instances'][0]['InstanceId']
-        click.echo(f"Instance created successfully: {instance_id}")
+        instance_ids = [instance['InstanceId'] for instance in response['Instances']]
+        click.echo(f"Instances created successfully: {', '.join(instance_ids)}")
+    except NoRegionError:
+        click.echo("You must specify a region.")
     except NoCredentialsError:
         click.echo("AWS credentials not found.")
     except PartialCredentialsError:
         click.echo("Incomplete AWS credentials.")
     except Exception as e:
-        click.echo(f"Error creating instance: {e}")
+        click.echo(f"Error creating instances: {e}")
 
+@cli.command(help="Delete AWS instances.")
+@click.option('--instance_ids', required=True, help='Space-separated IDs of the AWS instances to delete')
+def delete_aws_instances(instance_ids):
+    aws_credentials = load_aws_credentials()
+    if not aws_credentials:
+        click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
+        return
+
+    instance_ids_list = instance_ids.split()
+    try:
+        ec2 = boto3.client('ec2', **aws_credentials)
+        response = ec2.terminate_instances(
+            InstanceIds=instance_ids_list
+        )
+        terminated_instance_ids = [instance['InstanceId'] for instance in response['TerminatingInstances']]
+        click.echo(f"Instances deleted successfully: {', '.join(terminated_instance_ids)}")
+    except NoRegionError:
+        click.echo("You must specify a region.")
+    except NoCredentialsError:
+        click.echo("AWS credentials not found.")
+    except PartialCredentialsError:
+        click.echo("Incomplete AWS credentials.")
+    except Exception as e:
+        click.echo(f"Error deleting instances: {e}")
+
+@cli.command(help="List all EC2 instances and their statuses.")
+@click.option('--provider', required=True, help='Cloud provider to list instances from (e.g., aws)')
+def list_instances(provider):
+    if provider == 'aws':
+        aws_credentials = load_aws_credentials()
+        if not aws_credentials:
+            click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
+            return
+
+        try:
+            ec2 = boto3.client('ec2', **aws_credentials)
+            response = ec2.describe_instances()
+
+            running_instances = []
+            stopped_instances = []
+
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    instance_id = instance['InstanceId']
+                    state = instance['State']['Name']
+                    if state == 'running':
+                        running_instances.append(instance_id)
+                    elif state == 'stopped':
+                        stopped_instances.append(instance_id)
+
+            click.echo(f"Provider: AWS")
+            click.echo(f"Running instances ({len(running_instances)}): {', '.join(running_instances)}")
+            click.echo(f"Stopped instances ({len(stopped_instances)}): {', '.join(stopped_instances)}")
+        except NoRegionError:
+            click.echo("You must specify a region.")
+        except NoCredentialsError:
+            click.echo("AWS credentials not found.")
+        except PartialCredentialsError:
+            click.echo("Incomplete AWS credentials.")
+        except Exception as e:
+            click.echo(f"Error listing instances: {e}")
+    else:
+        click.echo(f"Provider '{provider}' is not supported yet.")
+
+# New Command: Stop EC2 Instances
+@cli.command(help="Stop AWS instances.")
+@click.option('--instance_ids', required=True, help='Space-separated IDs of the AWS instances to stop')
+def stop_aws_instances(instance_ids):
+    aws_credentials = load_aws_credentials()
+    if not aws_credentials:
+        click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
+        return
+
+    instance_ids_list = instance_ids.split()
+    try:
+        ec2 = boto3.client('ec2', **aws_credentials)
+        response = ec2.stop_instances(
+            InstanceIds=instance_ids_list
+        )
+        stopped_instance_ids = [instance['InstanceId'] for instance in response['StoppingInstances']]
+        click.echo(f"Instances stopped successfully: {', '.join(stopped_instance_ids)}")
+    except NoRegionError:
+        click.echo("You must specify a region.")
+    except NoCredentialsError:
+        click.echo("AWS credentials not found.")
+    except PartialCredentialsError:
+        click.echo("Incomplete AWS credentials.")
+    except Exception as e:
+        click.echo(f"Error stopping instances: {e}")
+# New Command: Start EC2 Instances
+@cli.command(help="Start AWS instances.")
+@click.option('--instance_ids', required=True, help='Space-separated IDs of the AWS instances to start')
+def start_aws_instances(instance_ids):
+    aws_credentials = load_aws_credentials()
+    if not aws_credentials:
+        click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
+        return
+
+    instance_ids_list = instance_ids.split()
+    try:
+        ec2 = boto3.client('ec2', **aws_credentials)
+        response = ec2.start_instances(
+            InstanceIds=instance_ids_list
+        )
+        started_instance_ids = [instance['InstanceId'] for instance in response['StartingInstances']]
+        click.echo(f"Instances started successfully: {', '.join(started_instance_ids)}")
+    except NoRegionError:
+        click.echo("You must specify a region.")
+    except NoCredentialsError:
+        click.echo("AWS credentials not found.")
+    except PartialCredentialsError:
+        click.echo("Incomplete AWS credentials.")
+    except Exception as e:
+        click.echo(f"Error starting instances: {e}")
 
 if __name__ == '__main__':
     cli()

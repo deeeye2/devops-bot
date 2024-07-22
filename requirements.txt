@@ -4,3 +4,11 @@ flask
 gunicorn
 click
 boto3
+yaml
+logging
+smtplib
+jwt
+psutil
+distro
+cryptography
+tqdm

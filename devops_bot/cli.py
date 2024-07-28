@@ -4,35 +4,420 @@ import json
 import requests
 import boto3
 import click
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.backends import default_backend
-from cryptography.fernet import Fernet
-from base64 import urlsafe_b64encode, urlsafe_b64decode  # Corrected import
-from getpass import getpass
-from flask import Flask, request, jsonify
-import threading
 import psutil
-from datetime import datetime
+import uuid
+import uuid
 import time
 import secrets
+import threading
+from getpass import getpass
+from datetime import datetime
+from tabulate import tabulate
+from cryptography.fernet import Fernet
+from flask import Flask, request, jsonify
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from base64 import urlsafe_b64encode, urlsafe_b64decode  # Corrected import
+from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
+
 
 cli = click.Group()
 
+# Click group definition
+@click.group()
+def cli():
+    """DevOps Bot CLI."""
+    pass
+
 API_BASE_URL = "https://devopsbot-testserver.online"
 
+JENKINS_KEY_FILE = 'jenkins_key.key'
+JENKINS_CREDENTIALS_BUCKET = 'jenkins-credentials.dob'
+JENKINS_CREDENTIALS_FILE = 'jenkins_credentials.enc'
 BASE_DIR = os.path.expanduser("~/.etc/devops-bot")
+VERSION_BUCKET_NAME = "devops-bot-version-bucket"
+VERSION_DIR = os.path.join(BASE_DIR, "version")
+KEY_FILE = os.path.join(BASE_DIR, "key.key")
 MASTER_INFO_FILE = os.path.join(BASE_DIR, "master_info.json")
 AWS_CREDENTIALS_FILE = os.path.join(BASE_DIR, "aws_credentials.json")
 DEVOPS_BOT_TOKEN_FILE = os.path.join(BASE_DIR, "devops_bot_token")
+DOB_SCREENPLAY_FILE = os.path.join(BASE_DIR, "dob_screenplay.yaml")
+MASTER_INFO_FILE = os.path.expanduser("~/.devops_master_info")
 
 # Initialize Flask app
 app = Flask(__name__)
+
+
+@cli.command(name="configure-aws", help="Configure AWS credentials.")
+@click.option('--aws_access_key_id', required=True, help="AWS Access Key ID")
+@click.option('--aws_secret_access_key', required=True, help="AWS Secret Access Key")
+@click.option('--region', required=True, help="AWS Region")
+def configure_aws(aws_access_key_id, aws_secret_access_key, region):
+    save_aws_credentials(aws_access_key_id, aws_secret_access_key, region)
+    click.echo("AWS credentials configured successfully.")           
 
 # Ensure user folder
 def ensure_user_folder():
     if not os.path.exists(BASE_DIR):
         os.makedirs(BASE_DIR, mode=0o700, exist_ok=True)
+
+#ensure private folder
+def ensure_private_folder():
+    """Ensure the private folder for storing master info exists with restricted permissions."""
+    private_folder = os.path.dirname(MASTER_INFO_FILE)
+    if not os.path.exists(private_folder):
+        os.makedirs(private_folder, mode=0o700, exist_ok=True)  # rwx------ permissions
+
+# Ensure version folder
+def ensure_version_folder():
+    if not os.path.exists(VERSION_DIR):
+        os.makedirs(VERSION_DIR, mode=0o700, exist_ok=True)
+
+
+@click.group()
+def vault():
+    """Manage the vault for sensitive information."""
+    pass
+
+# Vault utility functions
+def ensure_vault_folder():
+    if not os.path.exists(VAULT_FOLDER):
+        os.makedirs(VAULT_FOLDER, mode=0o700)
+
+def get_key(password, salt):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+        backend=default_backend()
+    )
+    return urlsafe_b64encode(kdf.derive(password.encode()))
+
+def save_config(config):
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f)
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    return None
+
+def setup_vault(password):
+    ensure_vault_folder()
+    salt = os.urandom(16)
+    key = get_key(password, salt)
+    config = {
+        "salt": urlsafe_b64encode(salt).decode('utf-8')
+    }
+    save_config(config)
+    print("Vault has been set up.")
+
+def generate_token():
+    return secrets.token_urlsafe(32)
+
+def save_token(token):
+    with open(TOKEN_FILE, 'w') as f:
+        f.write(token)
+    os.chmod(TOKEN_FILE, 0o600)  # rw-------
+
+def load_token():
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, 'r') as f:
+            return f.read().strip()
+    return None
+
+def encrypt_file(filepath, key):
+    fernet = Fernet(key)
+    with open(filepath, "rb") as file:
+        original = file.read()
+    encrypted = fernet.encrypt(original)
+    with open(filepath, "wb") as encrypted_file:
+        encrypted_file.write(encrypted)
+
+def decrypt_file(filepath, key):
+    fernet = Fernet(key)
+    with open(filepath, "rb") as encrypted_file:
+        encrypted = encrypted_file.read()
+    decrypted = fernet.decrypt(encrypted)
+    with open(filepath, "wb") as decrypted_file:
+        decrypted_file.write(decrypted)
+
+def move_to_vault(file_path, key):
+    ensure_vault_folder()
+    if not os.path.exists(file_path):
+        print(f"File {file_path} does not exist.")
+        return
+    destination = os.path.join(VAULT_FOLDER, os.path.basename(file_path))
+    shutil.move(file_path, destination)
+    encrypt_file(destination, key)
+    print(f"Moved and encrypted {file_path} to the vault.")
+
+def pull_from_vault(file_name, key):
+    file_path = os.path.join(VAULT_FOLDER, file_name)
+    if not os.path.exists(file_path):
+        print(f"File {file_name} does not exist in the vault.")
+        return
+    decrypt_file(file_path, key)
+    shutil.move(file_path, os.getcwd())
+    print(f"Decrypted and moved {file_name} to the current directory.")
+
+def show_files():
+    ensure_vault_folder()
+    files = [f for f in os.listdir(VAULT_FOLDER) if f != "config.json"]
+    if files:
+        print("Files in the vault:")
+        for file in files:
+            print(f" - {file}")
+    else:
+        print("The vault is empty.")
+
+
+
+@vault.command(name="setup", help="Setup the vault for sensitive information.")
+def setup_cmd():
+    if os.path.exists(CONFIG_FILE):
+        print("Vault is already set up. Please use 'vault-config' to configure the vault.")
+        return
+
+    password = getpass("Password: ")
+    confirm_password = getpass("Repeat for confirmation: ")
+    if password != confirm_password:
+        print("Passwords do not match. Please try again.")
+        return
+
+    setup_vault(password)
+    token = generate_token()
+    save_token(token)
+    click.echo(f"Vault has been set up. Please save this token securely: {token}")
+
+@vault.command(name="config", help="Configure the vault with password and token.")
+def config_cmd():
+    if not os.path.exists(CONFIG_FILE):
+        print("Vault is not set up. Please use 'vault-setup' to set up the vault first.")
+        return
+
+    password = getpass("Password: ")
+    token = getpass("Token: ")
+    saved_token = load_token()
+
+    if token != saved_token:
+        print("Invalid token.")
+        return
+
+    salt = urlsafe_b64decode(load_config()["salt"].encode('utf-8'))
+    key = get_key(password, salt)
+    click.echo("Vault configured successfully.")
+
+@vault.command(name="move", help="Move a file to the vault and encrypt it.")
+@click.argument('file_path')
+def move_cmd(file_path):
+    config = load_config()
+    if not config:
+        print("Vault is not set up.")
+        return
+
+    salt = urlsafe_b64decode(config["salt"].encode('utf-8'))
+    password = getpass("Password: ")
+    token = getpass("Token: ")
+    saved_token = load_token()
+
+    if token != saved_token:
+        print("Invalid token.")
+        return
+
+    key = get_key(password, salt)
+    move_to_vault(file_path, key)
+
+@vault.command(name="pull", help="Pull a file from the vault and decrypt it.")
+@click.argument('file_name')
+def pull_cmd(file_name):
+    config = load_config()
+    if not config:
+        print("Vault is not set up.")
+        return
+
+    salt = urlsafe_b64decode(config["salt"].encode('utf-8'))
+    password = getpass("Password: ")
+    token = getpass("Token: ")
+    saved_token = load_token()
+
+    if token != saved_token:
+        print("Invalid token.")
+        return
+
+    key = get_key(password, salt)
+    pull_from_vault(file_name, key)
+
+@vault.command(name="show", help="Show files in the vault.")
+def show_cmd():
+    show_files()
+
+@vault.command(name="encrypt", help="Encrypt a file.")
+@click.argument('file_path')
+def encrypt_cmd(file_path):
+    config = load_config()
+    if not config:
+        print("Vault is not set up.")
+        return
+
+    salt = urlsafe_b64decode(config["salt"].encode('utf-8'))
+    password = getpass("Password: ")
+    key = get_key(password, salt)
+    encrypt_file(file_path, key)
+    print(f"File {file_path} has been encrypted.")
+
+@vault.command(name="decrypt", help="Decrypt a file.")
+@click.argument('file_path')
+def decrypt_cmd(file_path):
+    config = load_config()
+    if not config:
+        print("Vault is not set up.")
+        return
+
+    salt = urlsafe_b64decode(config["salt"].encode('utf-8'))
+    password = getpass("Password: ")
+    key = get_key(password, salt)
+    decrypt_file(file_path, key)
+    print(f"File {file_path} has been decrypted.")
+
+#jenkins information
+
+def generate_jenkins_key():
+    key = Fernet.generate_key()
+    with open(JENKINS_KEY_FILE, 'wb') as key_file:
+        key_file.write(key)
+    click.echo("Jenkins encryption key generated and saved.")
+
+def load_jenkins_key():
+    return open(JENKINS_KEY_FILE, 'rb').read()
+
+def encrypt_jenkins_data(data, key):
+    fernet = Fernet(key)
+    encrypted = fernet.encrypt(data.encode())
+    return encrypted
+
+def decrypt_jenkins_data(encrypted_data, key):
+    fernet = Fernet(key)
+    decrypted = fernet.decrypt(encrypted_data).decode()
+    return decrypted
+
+def save_jenkins_credentials_to_s3(url, job_name, username, api_token):
+    ensure_user_folder()
+    if not os.path.exists(JENKINS_KEY_FILE):
+        generate_jenkins_key()
+    key = load_jenkins_key()
+
+    credentials = {
+        'jenkins_url': url,
+        'job_name': job_name,
+        'username': username,
+        'api_token': api_token
+    }
+
+    encrypted_credentials = encrypt_jenkins_data(json.dumps(credentials), key)
+
+    try:
+        credentials = load_aws_credentials()
+        s3 = boto3.client('s3', **credentials)
+        s3.create_bucket(Bucket=JENKINS_CREDENTIALS_BUCKET)
+        s3.put_object(Bucket=JENKINS_CREDENTIALS_BUCKET, Key=JENKINS_CREDENTIALS_FILE, Body=encrypted_credentials)
+        click.echo(f"Jenkins credentials saved to S3 bucket {JENKINS_CREDENTIALS_BUCKET}.")
+    except (NoCredentialsError, PartialCredentialsError) as e:
+        click.echo(f"Error with AWS credentials: {e}")
+    except ClientError as e:
+        click.echo(f"Error saving credentials to S3: {e}")
+
+
+@cli.command(name="configure-jenkins", help="Configure Jenkins credentials and save them to S3.")
+@click.option('--jenkins_url', required=True, help="Jenkins URL")
+@click.option('--job_name', required=True, help="Jenkins Job Name")
+@click.option('--username', required=True, help="Jenkins Username")
+@click.option('--api_token', required=True, hide_input=True, help="Jenkins API Token")
+def configure_jenkins(jenkins_url, job_name, username, api_token):
+    save_jenkins_credentials_to_s3(jenkins_url, job_name, username, api_token)
+
+
+def ensure_private_folder():
+    """Ensure the private folder for storing master info exists with restricted permissions."""
+    private_folder = os.path.dirname(MASTER_INFO_FILE)
+    if not os.path.exists(private_folder):
+        os.makedirs(private_folder, mode=0o700, exist_ok=True)  # rwx------ permissions
+
+
+# Ensure user folder
+def ensure_user_folder():
+    if not os.path.exists(BASE_DIR):
+        os.makedirs(BASE_DIR, mode=0o700, exist_ok=True)
+
+# Ensure version folder
+def ensure_version_folder():
+    if not os.path.exists(VERSION_DIR):
+        os.makedirs(VERSION_DIR, mode=0o700, exist_ok=True)
+
+# Generate encryption key
+def generate_key():
+    key = Fernet.generate_key()
+    with open(KEY_FILE, 'wb') as key_file:
+        key_file.write(key)
+    click.echo("Encryption key generated and saved.")
+
+# Load encryption key
+def load_key():
+    return open(KEY_FILE, 'rb').read()
+
+# Encrypt data
+def encrypt_data(data, key):
+    fernet = Fernet(key)
+    encrypted = fernet.encrypt(data.encode())
+    return encrypted
+
+# Decrypt data
+def decrypt_data(encrypted_data, key):
+    fernet = Fernet(key)
+    decrypted = fernet.decrypt(encrypted_data).decode()
+    return decrypted
+
+# Save AWS credentials encrypted
+def save_aws_credentials(access_key, secret_key, region):
+    ensure_user_folder()
+    key = load_key()
+    credentials = {
+        'aws_access_key_id': access_key,
+        'aws_secret_access_key': secret_key,
+        'region_name': region
+    }
+    encrypted_credentials = encrypt_data(json.dumps(credentials), key)
+    with open(AWS_CREDENTIALS_FILE, 'wb') as cred_file:
+        cred_file.write(encrypted_credentials)
+    os.chmod(AWS_CREDENTIALS_FILE, 0o600)
+    click.echo("AWS credentials encrypted and saved locally.")
+
+def check_bucket_exists(bucket_name):
+    try:
+        credentials = load_aws_credentials()
+        s3 = boto3.client('s3', **credentials)
+        s3.head_bucket(Bucket=bucket_name)
+        return True
+    except ClientError:
+        return False
+
+# Load AWS credentials and decrypt them
+def load_aws_credentials():
+    credentials = None
+    try:
+        if os.path.exists(AWS_CREDENTIALS_FILE):
+            key = load_key()
+            with open(AWS_CREDENTIALS_FILE, 'rb') as cred_file:
+                encrypted_credentials = cred_file.read()
+            decrypted_credentials = decrypt_data(encrypted_credentials, key)
+            credentials = json.loads(decrypted_credentials)
+    except FileNotFoundError:
+        pass
+    return credentials
+
 
 # Save master info
 def save_master_info(instance_id, public_ip, security_group, key_pair):
@@ -75,11 +460,7 @@ def get_instance_metadata():
     except RequestException as e:
         raise Exception(f"Error fetching metadata: {e}")
 
-# Click group definition
-@click.group()
-def cli():
-    """DevOps Bot CLI."""
-    pass
+
 
 @cli.command(name="master-setup", help="Setup master instance information.")
 def setup_master():
@@ -129,13 +510,7 @@ def save_aws_credentials(access_key, secret_key, region):
         json.dump(credentials, cred_file)
     os.chmod(AWS_CREDENTIALS_FILE, 0o600)
 
-@cli.command(name="configure-aws", help="Configure AWS credentials.")
-@click.option('--aws_access_key_id', required=True, help="AWS Access Key ID")
-@click.option('--aws_secret_access_key', required=True, help="AWS Secret Access Key")
-@click.option('--region', required=True, help="AWS Region")
-def configure_aws(aws_access_key_id, aws_secret_access_key, region):
-    save_aws_credentials(aws_access_key_id, aws_secret_access_key, region)
-    click.echo("AWS credentials configured successfully.")
+
 
 @cli.command(help="Greet the user.")
 def greet():
@@ -145,14 +520,6 @@ def greet():
 def version():
     click.echo("devops-bot, version 0.1")
 
-@cli.command(help="Create a directory at the specified path.")
-@click.argument('path')
-def mkdir(path):
-    try:
-        os.makedirs(path, exist_ok=True)
-        click.echo(f"Directory '{path}' created successfully.")
-    except Exception as e:
-        click.echo(f"Failed to create directory '{path}': {e}")
 
 @cli.command(help="Solve an issue using the knowledge base.")
 @click.argument('issue')
@@ -227,91 +594,542 @@ def create(resource_type, manifest_type, params):
         click.echo("Failed to generate file.")
         click.echo(response.json().get('message'))
 
-@cli.command(help="Create AWS instances.")
-@click.option('--params', required=True, help='Parameters for the AWS instance (e.g., "image_id=ami-0abcdef1234567890 instance_type=t2.micro")')
-@click.option('--count', default=1, help="Number of instances to create")
-@click.option('--tag1', help='First tag for the instances (e.g., "Key1=Value1")')
-@click.option('--tag2', help='Second tag for the instances (e.g., "Key2=Value2")')
-@click.option('--tag3', help='Third tag for the instances (e.g., "Key3=Value3")')
-@click.option('--tag4', help='Fourth tag for the instances (e.g., "Key4=Value4")')
-@click.option('--tag5', help='Fifth tag for the instances (e.g., "Key5=Value5")')
-@click.option('--security_group', help='Security group for the instances')
-@click.option('--key_name', help='Key pair name for the instances')
-def create_aws_instance(params, count, tag1, tag2, tag3, tag4, tag5, security_group, key_name):
-    aws_credentials = load_aws_credentials()
-    if not aws_credentials:
-        click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
+# Delete instance
+@cli.command(name="delete-ec2", help="Delete EC2 instances using instance IDs or a version ID.")
+@click.argument('ids', nargs=-1)
+@click.option('--version-id', help="Version ID to delete instances from")
+def delete_ec2(ids, version_id):
+    instance_ids = list(ids)
+
+    if version_id:
+        version_info = load_version_info(version_id)
+        if not version_info:
+            click.echo("No version information found.")
+            return
+        instance_ids.extend(instance['InstanceId'] for instance in version_info['content'])
+
+    if not instance_ids:
+        click.echo("No instance IDs provided.")
         return
 
-    params_dict = dict(param.split('=') for param in params.split())
-    tags = [tag1, tag2, tag3, tag4, tag5]
-    tags_list = [{'Key': tag.split('=')[0], 'Value': tag.split('=')[1]} for tag in tags if tag]
-    tag_specifications = [{'ResourceType': 'instance', 'Tags': tags_list}] if tags_list else []
+    table_data = [
+        [click.style("-", fg="red"), "Instance ID", instance_id] for instance_id in instance_ids
+    ]
+    click.echo(click.style("\nStaging area: Deleting EC2 instance(s) with IDs:", fg="red"))
+    click.echo(tabulate(table_data, headers=["", "Attribute", "Value"], tablefmt="grid"))
 
-    try:
-        ec2 = boto3.client('ec2', **aws_credentials)
-        run_instances_params = {
-            'ImageId': params_dict.get('image_id'),
-            'InstanceType': params_dict.get('instance_type'),
-            'MinCount': count,
-            'MaxCount': count,
-            'TagSpecifications': tag_specifications if tag_specifications else None
-        }
-        if security_group:
-            run_instances_params['SecurityGroupIds'] = [security_group]
-        if key_name:
-            run_instances_params['KeyName'] = key_name
-
-        response = ec2.run_instances(**run_instances_params)
-        instance_ids = [instance['InstanceId'] for instance in response['Instances']]
-        click.echo(f"Instances created successfully: {', '.join(instance_ids)}")
-    except NoRegionError:
-        click.echo("You must specify a region.")
-    except NoCredentialsError:
-        click.echo("AWS credentials not found.")
-    except PartialCredentialsError:
-        click.echo("Incomplete AWS credentials.")
-    except Exception as e:
-        click.echo(f"Error creating instances: {e}")
-
-@cli.command(help="List all EC2 instances and their statuses.")
-@click.option('--provider', required=True, help='Cloud provider to list instances from (e.g., aws)')
-def list_instances(provider):
-    if provider == 'aws':
-        aws_credentials = load_aws_credentials()
-        if not aws_credentials:
-            click.echo("No AWS credentials found. Please configure them first using 'devops-bot configure-aws'.")
-            return
+    if click.confirm(click.style("Do you want to proceed with deleting the instance(s)?", fg="red"), default=False):
+        comment = click.prompt(click.style("Enter a comment for this version", fg="red"))
+        version_id = str(uuid.uuid4())  # Generate a unique version ID
 
         try:
-            ec2 = boto3.client('ec2', **aws_credentials)
+            terminated_instances = delete_ec2_instances(instance_ids)
+            if terminated_instances is None:
+                raise Exception("Instance deletion failed. Aborting operation.")
+
+            click.echo(click.style("Instances deleted successfully.", fg="green"))
+            for idx, instance in enumerate(terminated_instances):
+                click.echo(click.style(f"Instance {idx+1}: ID = {instance['InstanceId']} - {instance['CurrentState']['Name']}", fg="green"))
+
+            version_content = [{'InstanceId': instance['InstanceId'], 'CurrentState': instance['CurrentState']} for instance in terminated_instances]
+
+            if check_bucket_exists(VERSION_BUCKET_NAME):
+                save_version_info_to_bucket(version_id, comment, version_content)
+            else:
+                if click.confirm("Do you want to save the version information in a bucket?", default=False):
+                    create_version_bucket()
+                    save_version_info_to_bucket(version_id, comment, version_content)
+                else:
+                    save_version_info_locally(version_id, comment, version_content)
+        except Exception as e:
+            click.echo(click.style(f"Failed to delete instances: {e}", fg="red"))
+    else:
+        click.echo(click.style("Instance deletion aborted.", fg="yellow"))
+
+# Utility function for deleting EC2 instances
+def delete_ec2_instances(instance_ids):
+    credentials = load_aws_credentials()
+    if not credentials:
+        click.echo("No AWS credentials found. Please configure them first.")
+        return None
+
+    ec2 = boto3.client('ec2', **credentials)
+    try:
+        response = ec2.terminate_instances(InstanceIds=instance_ids)
+        return response['TerminatingInstances']
+    except ClientError as e:
+        click.echo(click.style(f"Failed to delete instances: {e}", fg="red"))
+        return None
+
+# Assuming utility functions for encryption, AWS credential loading, version saving/loading are present
+
+def save_version_info_locally(version_id, comment, content):
+    ensure_version_folder()
+    key = load_key()
+    version_info = {
+        'version_id': version_id,
+        'comment': comment,
+        'content': content
+    }
+    encrypted_version_info = encrypt_data(json.dumps(version_info), key)
+    with open(os.path.join(VERSION_DIR, f"{version_id}.enc"), 'wb') as version_file:
+        version_file.write(encrypted_version_info)
+    click.echo(f"Version information saved locally with ID {version_id}.")
+
+def save_version_info_to_bucket(version_id, comment, content):
+    key = load_key()
+    credentials = load_aws_credentials()
+    if not credentials:
+        click.echo("No AWS credentials found. Please configure them first.")
+        return None
+
+    version_info = {
+        'version_id': version_id,
+        'comment': comment,
+        'content': [serialize_instance_info(instance) for instance in content]
+    }
+    encrypted_version_info = encrypt_data(json.dumps(version_info), key)
+
+    s3 = boto3.client('s3', **credentials)
+    try:
+        s3.put_object(Bucket=VERSION_BUCKET_NAME, Key=f"{version_id}.enc", Body=encrypted_version_info)
+        click.echo(f"Version information saved in S3 bucket with ID {version_id}.")
+    except ClientError as e:
+        click.echo(click.style(f"Failed to save version information to bucket: {e}", fg="red"))
+
+def create_ec2_instances(instance_type, ami_id, key_name, security_group, count, tags, user_data=None):
+    credentials = load_aws_credentials()
+    if not credentials:
+        click.echo("No AWS credentials found. Please configure them first.")
+        return None
+
+    ec2 = boto3.client('ec2', **credentials)
+    try:
+        instances = ec2.run_instances(
+            InstanceType=instance_type,
+            ImageId=ami_id,
+            KeyName=key_name,
+            SecurityGroupIds=[security_group],
+            MinCount=count,
+            MaxCount=count,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'instance',
+                    'Tags': [{'Key': key, 'Value': value} for key, value in tags.items()]
+                }
+            ],
+            UserData=user_data
+        )
+        return instances['Instances']
+    except ClientError as e:
+        click.echo(click.style(f"Failed to create instances: {e}", fg="red"))
+        return None
+
+
+
+def list_ec2_instances_to_file():
+    credentials = load_aws_credentials()
+    ec2 = boto3.client('ec2', **credentials)
+    try:
+        response = ec2.describe_instances()
+        instances = []
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                instance_id = instance['InstanceId']
+                instance_type = instance['InstanceType']
+                key_name = instance.get('KeyName', '-')
+                security_groups = ', '.join([sg['GroupId'] for sg in instance.get('SecurityGroups', [])])
+                state = instance['State']['Name']
+                state_symbol = {
+                    'running': click.style('+', fg='green'),
+                    'stopped': click.style('+', fg='red'),
+                    'terminated': click.style('+', fg='yellow')
+                }.get(state, state)
+                launch_time = instance['LaunchTime'].strftime('%Y-%m-%d %H:%M:%S')
+                tags = ', '.join([f"{tag['Key']}={tag['Value']}" for tag in instance.get('Tags', [])])
+                public_ip = instance.get('PublicIpAddress', 'N/A')
+                instances.append({
+                    "State": state_symbol,
+                    "Instance ID": instance_id,
+                    "Instance Type": instance_type,
+                    "Key Name": key_name,
+                    "Security Groups": security_groups,
+                    "Launch Time": launch_time,
+                    "Tags": tags,
+                    "Public IP": public_ip
+                })
+
+        with open('ec2_instances.json', 'w') as file:
+            json.dump(instances, file)
+        click.echo("EC2 instances information updated.")
+    except ClientError as e:
+        click.echo(click.style(f"Failed to list instances: {e}", fg="red"))
+
+
+@cli.command(name="create-ec2", help="Create EC2 instances with specified options.")
+@click.option('--instance-type', required=True, help="EC2 instance type")
+@click.option('--ami-id', required=True, help="AMI ID")
+@click.option('--key-name', required=True, help="Key pair name")
+@click.option('--security-group', required=True, help="Security group ID")
+@click.option('--count', default=1, help="Number of instances to create")
+@click.option('--tags', multiple=True, type=(str, str), help="Tags for the instance in key=value format", required=False)
+def create_ec2(instance_type, ami_id, key_name, security_group, count, tags):
+    tags_dict = dict(tags)
+    table_data = [
+        [click.style("+", fg="green"), "Instance Type", instance_type],
+        [click.style("+", fg="green"), "AMI ID", ami_id],
+        [click.style("+", fg="green"), "Key Name", key_name],
+        [click.style("+", fg="green"), "Security Group", security_group],
+        [click.style("+", fg="green"), "Count", count],
+        [click.style("+", fg="green"), "Tags", tags_dict]
+    ]
+    click.echo(click.style("\nStaging area: Creating EC2 instance(s) with the following configuration:\n", fg="green"))
+    click.echo(tabulate(table_data, headers=["", "Attribute", "Value"], tablefmt="grid"))
+
+    if click.confirm(click.style("Do you want to proceed with creating the instance(s)?", fg="green"), default=True):
+        version_id = str(uuid.uuid4())  # Generate a unique version ID
+        comment = click.prompt(click.style("Enter a comment for this version", fg="green"))
+
+        try:
+            instances = create_ec2_instances(instance_type, ami_id, key_name, security_group, count, tags_dict)
+            if instances is None:
+                raise Exception("Instance creation failed. Aborting operation.")
+
+            click.echo(click.style("Instances created successfully.", fg="green"))
+            for idx, instance in enumerate(instances):
+                click.echo(click.style(f"Instance {idx+1}: ID = {instance['InstanceId']}", fg="green"))
+
+            version_content = [{'InstanceId': instance['InstanceId'], 'InstanceType': instance['InstanceType'], 'ImageId': instance['ImageId'], 'KeyName': instance['KeyName'], 'SecurityGroups': instance['SecurityGroups'], 'Tags': instance.get('Tags', [])} for instance in instances]
+
+            if check_bucket_exists(VERSION_BUCKET_NAME):
+                save_version_info_to_bucket(version_id, comment, version_content)
+            else:
+                if click.confirm("Do you want to save the version information in a bucket?", default=False):
+                    create_version_bucket()
+                    save_version_info_to_bucket(version_id, comment, version_content)
+                else:
+                    save_version_info_locally(version_id, comment, version_content)
+        except Exception as e:
+            click.echo(click.style(f"Failed to create instances: {e}", fg="red"))
+    else:
+        click.echo(click.style("Instance creation aborted.", fg="yellow"))
+
+def load_version_info(version_id):
+    key = load_key()
+    if os.path.exists(os.path.join(VERSION_DIR, f"{version_id}.enc")):
+        with open(os.path.join(VERSION_DIR, f"{version_id}.enc"), 'rb') as version_file:
+            encrypted_version_info = version_file.read()
+        decrypted_version_info = decrypt_data(encrypted_version_info, key)
+        return json.loads(decrypted_version_info)
+    else:
+        try:
+            credentials = load_aws_credentials()
+            s3 = boto3.client('s3', **credentials)
+            response = s3.get_object(Bucket=VERSION_BUCKET_NAME, Key=f"{version_id}.enc")
+            encrypted_version_info = response['Body'].read()
+            decrypted_version_info = decrypt_data(encrypted_version_info, key)
+            return json.loads(decrypted_version_info)
+        except ClientError as e:
+            click.echo(click.style(f"No version information found for ID {version_id}.", fg="red"))
+            return None
+
+@cli.command(name="recreate-ec2", help="Recreate EC2 instances using a version ID.")
+@click.option('--version-id', required=True, help="Version ID to recreate instances from")
+def recreate_ec2(version_id):
+    version_info = load_version_info(version_id)
+    if not version_info:
+        click.echo("No version information found.")
+        return
+
+    instances_to_recreate = version_info['content']
+
+    click.echo(click.style(f"\nStaging area: Recreating EC2 instance(s):", fg="green"))
+    table_data = []
+    for idx, instance in enumerate(instances_to_recreate):
+        table_data.append([click.style("+", fg="green"), "Instance Type", instance.get('InstanceType', 'Unknown')])
+        table_data.append([click.style("+", fg="green"), "AMI ID", instance.get('ImageId', 'Unknown')])
+        table_data.append([click.style("+", fg="green"), "Key Name", instance.get('KeyName', 'Unknown')])
+        security_groups = instance.get('SecurityGroups', [])
+        security_group_ids = [sg['GroupId'] for sg in security_groups] if security_groups else None
+        table_data.append([click.style("+", fg="green"), "Security Group", security_group_ids if security_group_ids else 'None'])
+        table_data.append([click.style("+", fg="green"), "Tags", instance.get('Tags', [])])
+    click.echo(tabulate(table_data, headers=["", "Attribute", "Value"], tablefmt="grid"))
+
+    if click.confirm(click.style("Do you want to proceed with recreating the instance(s)?", fg="green"), default=True):
+        new_version_id = str(uuid.uuid4())
+        comment = click.prompt(click.style("Enter a new comment for this version", fg="green"))
+
+        try:
+            recreated_instances = []
+            for instance in instances_to_recreate:
+                created_instances = create_ec2_instances(
+                    instance_type=instance.get('InstanceType', 'Unknown'),
+                    ami_id=instance.get('ImageId', 'Unknown'),
+                    key_name=instance.get('KeyName', 'Unknown'),
+                    security_group=security_group_ids[0] if security_group_ids else None,
+                    count=1,
+                    tags={tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                )
+                if created_instances is None:
+                    raise Exception("Instance recreation failed. Aborting operation.")
+                recreated_instances.extend(created_instances)
+
+            click.echo(click.style("Instances recreated successfully.", fg="green"))
+            for idx, instance in enumerate(recreated_instances):
+                click.echo(click.style(f"Instance {idx+1}: ID = {instance['InstanceId']}", fg="green"))
+
+            if check_bucket_exists(VERSION_BUCKET_NAME):
+                save_version_info_to_bucket(new_version_id, comment, recreated_instances)
+            else:
+                if click.confirm("Do you want to save the version information in a bucket?", default=False):
+                    create_version_bucket()
+                    save_version_info_to_bucket(new_version_id, comment, recreated_instances)
+                else:
+                    save_version_info_locally(new_version_id, comment, recreated_instances)
+        except Exception as e:
+            click.echo(click.style(f"Failed to recreate instances: {e}", fg="red"))
+    else:
+        click.echo(click.style("Instance recreation aborted.", fg="yellow"))
+
+
+def list_versions():
+    versions = []
+    key = load_key()
+    # Check local versions
+    for file_name in os.listdir(VERSION_DIR):
+        if file_name.endswith(".enc"):
+            version_id = file_name.split(".")[0]
+            version_info = load_version_info(version_id)
+            if version_info:
+                timestamp = datetime.fromtimestamp(os.path.getmtime(os.path.join(VERSION_DIR, f"{version_id}.enc"))).strftime('%Y-%m-%d %H:%M:%S')
+                instance_count = len(version_info['content'])
+                versions.append((version_id, version_info.get('comment', ''), timestamp, instance_count))
+    # Check S3 versions
+    credentials = load_aws_credentials()
+    s3 = boto3.client('s3', **credentials)
+    try:
+        response = s3.list_objects_v2(Bucket=VERSION_BUCKET_NAME)
+        for obj in response.get('Contents', []):
+            version_id = obj['Key'].split(".")[0]
+            version_info = load_version_info(version_id)
+            if version_info:
+                timestamp = obj['LastModified'].strftime('%Y-%m-%d %H:%M:%S')
+                instance_count = len(version_info['content'])
+                versions.append((version_id, version_info.get('comment', ''), timestamp, instance_count))
+    except ClientError as e:
+        click.echo(click.style(f"Error listing versions in S3: {e}", fg="red"))
+    return versions
+
+@cli.command(name="view-version", help="View version information.")
+@click.option('-o', '--output', type=click.Choice(['table', 'wide']), default='table', help="Output format")
+def view_version(output):
+    versions = list_versions()
+    if output == 'table':
+        table = [[version_id, comment, timestamp, count] for version_id, comment, timestamp, count in versions]
+        headers = ["Version ID", "Comment", "Date", "Time", "Count"]
+        click.echo(tabulate(table, headers, tablefmt="grid"))
+    elif output == 'wide':
+        for version_id, comment, timestamp, count in versions:
+            version_info = load_version_info(version_id)
+            click.echo(click.style(f"Version ID: {version_id}", fg="green"))
+            click.echo(click.style(f"Comment: {comment}", fg="green"))
+            click.echo(click.style(f"Timestamp: {timestamp}", fg="green"))
+            click.echo(click.style(f"Count: {count}", fg="green"))
+            click.echo(click.style(json.dumps(version_info['content'], indent=2), fg="green"))
+            click.echo("-" * 80)
+
+# List EC2 instances command
+
+# List EC2 instances command
+@cli.command(name="list-ec2", help="List EC2 instances in a table format.")
+@click.option('--instance-ids', multiple=True, help="Filter by instance IDs")
+def list_ec2_instances(instance_ids):
+    credentials = load_aws_credentials()
+    ec2 = boto3.client('ec2', **credentials)
+    try:
+        if instance_ids:
+            response = ec2.describe_instances(InstanceIds=instance_ids)
+        else:
             response = ec2.describe_instances()
 
-            running_instances = []
-            stopped_instances = []
+        instances = []
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                instance_id = instance['InstanceId']
+                instance_type = instance['InstanceType']
+                key_name = instance.get('KeyName', '-')
+                security_groups = ', '.join([sg['GroupId'] for sg in instance.get('SecurityGroups', [])])
+                state = instance['State']['Name']
+                public_ip = instance.get('PublicIpAddress', 'N/A')
+                state_symbol = {
+                    'running': click.style('+', fg='green'),
+                    'stopped': click.style('-', fg='red'),
+                    'terminated': click.style('x', fg='yellow')
+                }.get(state, state)
+                launch_time = instance['LaunchTime'].strftime('%Y-%m-%d %H:%M:%S')
+                tags = ', '.join([f"{tag['Key']}={tag['Value']}" for tag in instance.get('Tags', [])])
+                instances.append([
+                    state_symbol, instance_id, instance_type, key_name, security_groups,
+                    launch_time, tags, public_ip
+                ])
 
+        headers = ["State", "Instance ID", "Instance Type", "Key Name", "Security Groups", "Launch Time", "Tags", "Public IP"]
+        click.echo(tabulate(instances, headers, tablefmt="grid"))
+    except ClientError as e:
+        click.echo(click.style(f"Failed to list instances: {e}", fg="red"))
+
+
+# List S3 buckets command
+@cli.command(name="list-s3", help="List S3 buckets in a table format.")
+def list_s3_buckets():
+    credentials = load_aws_credentials()
+    s3 = boto3.client('s3', **credentials)
+    try:
+        response = s3.list_buckets()
+        buckets = []
+        for bucket in response['Buckets']:
+            bucket_name = bucket['Name']
+            creation_date = bucket['CreationDate'].strftime('%Y-%m-%d %H:%M:%S')
+            try:
+                encryption = s3.get_bucket_encryption(Bucket=bucket_name)
+                enc_rules = encryption['ServerSideEncryptionConfiguration']['Rules']
+                encryption_status = 'Enabled'
+            except ClientError:
+                encryption_status = 'None'
+
+            try:
+                object_count = s3.list_objects_v2(Bucket=bucket_name)['KeyCount']
+            except ClientError:
+                object_count = 'Unknown'
+
+            buckets.append([
+                bucket_name, creation_date, encryption_status, object_count
+            ])
+
+        headers = ["Bucket Name", "Creation Date", "Encryption", "Number of Objects"]
+        click.echo(tabulate(buckets, headers, tablefmt="grid"))
+    except ClientError as e:
+        click.echo(click.style(f"Failed to list buckets: {e}", fg="red"))
+
+# List objects in a specific S3 bucket command
+@cli.command(name="list-objects", help="List objects in a specific S3 bucket in a table format.")
+@click.argument('bucket_name')
+def list_s3_objects(bucket_name):
+    credentials = load_aws_credentials()
+    s3 = boto3.client('s3', **credentials)
+    try:
+        response = s3.list_objects_v2(Bucket=bucket_name)
+        if 'Contents' not in response:
+            click.echo(click.style(f"No objects found in bucket {bucket_name}.", fg="yellow"))
+            return
+
+        objects = []
+        for obj in response['Contents']:
+            key = obj['Key']
+            size = obj['Size']
+            last_modified = obj['LastModified'].strftime('%Y-%m-%d %H:%M:%S')
+            storage_class = obj['StorageClass']
+            objects.append([
+                key, size, last_modified, storage_class
+            ])
+
+        headers = ["Object Key", "Size (Bytes)", "Last Modified", "Storage Class"]
+        click.echo(tabulate(objects, headers, tablefmt="grid"))
+    except ClientError as e:
+        click.echo(click.style(f"Failed to list objects in bucket {bucket_name}: {e}", fg="red"))
+
+@cli.command(name="delete-object", help="Delete an object from an S3 bucket.")
+@click.argument('bucket_name')
+@click.argument('object_key')
+def delete_object(bucket_name, object_key):
+    click.echo(click.style("Warning: This action is irreversible and you will not be able to recreate the object. No version information will be saved.", fg="red"))
+    if click.confirm(click.style("Do you want to proceed with deleting the object?", fg="red"), default=False):
+        comment = click.prompt(click.style("Enter a comment for this deletion", fg="red"))
+        try:
+            credentials = load_aws_credentials()
+            s3 = boto3.client('s3', **credentials)
+            s3.delete_object(Bucket=bucket_name, Key=object_key)
+            click.echo(click.style(f"Object '{object_key}' deleted successfully from bucket '{bucket_name}'.", fg="green"))
+        except ClientError as e:
+            click.echo(click.style(f"Failed to delete object: {e}", fg="red"))
+    else:
+        click.echo(click.style("Object deletion aborted.", fg="yellow"))
+
+@cli.command(name="delete-bucket", help="Delete an S3 bucket.")
+@click.argument('bucket_name')
+def delete_bucket(bucket_name):
+    click.echo(click.style("Warning: This action is irreversible and you will not be able to recreate the bucket or its contents. No version information will be saved.", fg="red"))
+    if click.confirm(click.style("Do you want to proceed with deleting the bucket?", fg="red"), default=False):
+        try:
+            credentials = load_aws_credentials()
+            s3 = boto3.client('s3', **credentials)
+            # Empty the bucket before deleting
+            response = s3.list_objects_v2(Bucket=bucket_name)
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    s3.delete_object(Bucket=bucket_name, Key=obj['Key'])
+            s3.delete_bucket(Bucket=bucket_name)
+            click.echo(click.style(f"Bucket '{bucket_name}' and all its contents deleted successfully.", fg="green"))
+        except ClientError as e:
+            click.echo(click.style(f"Failed to delete bucket: {e}", fg="red"))
+    else:
+        click.echo(click.style("Bucket deletion aborted.", fg="yellow"))
+
+
+def fetch_instance_details(instance_ids, credentials):
+    ec2 = boto3.client('ec2', **credentials)
+    max_retries = 10
+    wait_time = 60
+
+    for _ in range(max_retries):
+        try:
+            response = ec2.describe_instances(InstanceIds=instance_ids)
+            all_running = True
             for reservation in response['Reservations']:
                 for instance in reservation['Instances']:
-                    instance_id = instance['InstanceId']
-                    state = instance['State']['Name']
-                    if state == 'running':
-                        running_instances.append(instance_id)
-                    elif state == 'stopped':
-                        stopped_instances.append(instance_id)
+                    if instance['State']['Name'] != 'running':
+                        all_running = False
+                        break
+                if not all_running:
+                    break
+            if all_running:
+                return response['Reservations']
+            else:
+                time.sleep(wait_time)  # Wait before retrying
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidInstanceID.NotFound':
+                time.sleep(wait_time)  # Wait before retrying
+            else:
+                raise e
+    raise Exception(f"Instances {instance_ids} did not reach running state within the allotted time.")
 
-            click.echo(f"Provider: AWS")
-            click.echo(f"Running instances ({len(running_instances)}): {', '.join(running_instances)}")
-            click.echo(f"Stopped instances ({len(stopped_instances)}): {', '.join(stopped_instances)}")
-        except NoRegionError:
-            click.echo("You must specify a region.")
-        except NoCredentialsError:
-            click.echo("AWS credentials not found.")
-        except PartialCredentialsError:
-            click.echo("Incomplete AWS credentials.")
-        except Exception as e:
-            click.echo(f"Error listing instances: {e}")
-    else:
-        click.echo(f"Provider '{provider}' is not supported yet.")
+
+# Serialize instance information
+def serialize_instance_info(instance):
+    for key, value in instance.items():
+        if isinstance(value, datetime):
+            instance[key] = value.isoformat()
+        elif isinstance(value, list):
+            instance[key] = [serialize_instance_info(item) if isinstance(item, dict) else item for item in value]
+        elif isinstance(value, dict):
+            instance[key] = serialize_instance_info(value)
+    return instance
+
+def create_version_bucket():
+    credentials = load_aws_credentials()
+    if not credentials:
+        click.echo("No AWS credentials found. Please configure them first.")
+        return None
+
+    s3 = boto3.client('s3', **credentials)
+    try:
+        if click.confirm("Do you want to create a new bucket for version information?", default=True):
+            s3.create_bucket(Bucket=VERSION_BUCKET_NAME)
+            click.echo(f"S3 bucket '{VERSION_BUCKET_NAME}' created successfully.")
+    except ClientError as e:
+        click.echo(click.style(f"Failed to create S3 bucket: {e}", fg="red"))
+
+
 
 @cli.command(help="Stop AWS instances.")
 @click.option('--instance_ids', required=True, help='Space-separated IDs of the AWS instances to stop')
@@ -944,214 +1762,94 @@ def system_monitor():
     for key, value in system_info.items():
         click.echo(f"{key}: {value}")
 
+def load_jenkins_credentials_from_s3():
+    key = load_jenkins_key()
+    try:
+        credentials = load_aws_credentials()
+        s3 = boto3.client('s3', **credentials)
+        response = s3.get_object(Bucket=JENKINS_CREDENTIALS_BUCKET, Key=JENKINS_CREDENTIALS_FILE)
+        encrypted_credentials = response['Body'].read()
+        decrypted_credentials = decrypt_jenkins_data(encrypted_credentials, key)
+        return json.loads(decrypted_credentials)
+    except (NoCredentialsError, PartialCredentialsError) as e:
+        click.echo(f"Error with AWS credentials: {e}")
+    except ClientError as e:
+        click.echo(f"Error loading credentials from S3: {e}")
+        return None
 
-
-
-# Vault utility functions
-def ensure_vault_folder():
-    if not os.path.exists(VAULT_FOLDER):
-        os.makedirs(VAULT_FOLDER, mode=0o700)
-
-def get_key(password, salt):
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100000,
-        backend=default_backend()
-    )
-    return urlsafe_b64encode(kdf.derive(password.encode()))
-
-def save_config(config):
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f)
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return None
-
-def setup_vault(password):
-    ensure_vault_folder()
-    salt = os.urandom(16)
-    key = get_key(password, salt)
-    config = {
-        "salt": urlsafe_b64encode(salt).decode('utf-8')
-    }
-    save_config(config)
-    print("Vault has been set up.")
-
-def generate_token():
-    return secrets.token_urlsafe(32)
-
-def save_token(token):
-    with open(TOKEN_FILE, 'w') as f:
-        f.write(token)
-    os.chmod(TOKEN_FILE, 0o600)  # rw-------
-
-def load_token():
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, 'r') as f:
-            return f.read().strip()
-    return None
-
-def encrypt_file(filepath, key):
-    fernet = Fernet(key)
-    with open(filepath, "rb") as file:
-        original = file.read()
-    encrypted = fernet.encrypt(original)
-    with open(filepath, "wb") as encrypted_file:
-        encrypted_file.write(encrypted)
-
-def decrypt_file(filepath, key):
-    fernet = Fernet(key)
-    with open(filepath, "rb") as encrypted_file:
-        encrypted = encrypted_file.read()
-    decrypted = fernet.decrypt(encrypted)
-    with open(filepath, "wb") as decrypted_file:
-        decrypted_file.write(decrypted)
-
-def move_to_vault(file_path, key):
-    ensure_vault_folder()
-    if not os.path.exists(file_path):
-        print(f"File {file_path} does not exist.")
+def create_jenkins_job(job_name, jenkinsfile_path):
+    jenkins_credentials = load_jenkins_credentials_from_s3()
+    if not jenkins_credentials:
+        click.echo("Failed to load Jenkins credentials.")
         return
-    destination = os.path.join(VAULT_FOLDER, os.path.basename(file_path))
-    shutil.move(file_path, destination)
-    encrypt_file(destination, key)
-    print(f"Moved and encrypted {file_path} to the vault.")
 
-def pull_from_vault(file_name, key):
-    file_path = os.path.join(VAULT_FOLDER, file_name)
-    if not os.path.exists(file_path):
-        print(f"File {file_name} does not exist in the vault.")
-        return
-    decrypt_file(file_path, key)
-    shutil.move(file_path, os.getcwd())
-    print(f"Decrypted and moved {file_name} to the current directory.")
+    jenkins_url = jenkins_credentials['jenkins_url']
+    username = jenkins_credentials['username']
+    api_token = jenkins_credentials['api_token']
 
-def show_files():
-    ensure_vault_folder()
-    files = [f for f in os.listdir(VAULT_FOLDER) if f != "config.json"]
-    if files:
-        print("Files in the vault:")
-        for file in files:
-            print(f" - {file}")
+    with open(jenkinsfile_path, 'r') as file:
+        jenkinsfile_content = file.read()
+
+    job_config_xml = f"""<?xml version='1.1' encoding='UTF-8'?>
+<flow-definition plugin="workflow-job@2.40">
+  <description></description>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps@2.92">
+    <script>{jenkinsfile_content}</script>
+    <sandbox>true</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>"""
+
+    job_url = f"{jenkins_url}/createItem?name={job_name}"
+    headers = {'Content-Type': 'application/xml'}
+    response = requests.post(job_url, data=job_config_xml, headers=headers, auth=(username, api_token))
+
+    if response.status_code == 200:
+        return f"Job '{job_name}' created successfully."
+    elif response.status_code == 400:
+        return f"Job '{job_name}' already exists. Updating the job."
     else:
-        print("The vault is empty.")
+        return f"Failed to create job '{job_name}'. Status code: {response.status_code}\n{response.text}"
 
-@click.group()
-def vault():
-    """Manage the vault for sensitive information."""
-    pass
-
-@vault.command(name="setup", help="Setup the vault for sensitive information.")
-def setup_cmd():
-    if os.path.exists(CONFIG_FILE):
-        print("Vault is already set up. Please use 'vault-config' to configure the vault.")
+def trigger_jenkins_job(job_name):
+    credentials = load_jenkins_credentials_from_s3()
+    if not credentials:
+        click.echo("Failed to load Jenkins credentials.")
         return
 
-    password = getpass("Password: ")
-    confirm_password = getpass("Repeat for confirmation: ")
-    if password != confirm_password:
-        print("Passwords do not match. Please try again.")
-        return
+    jenkins_url = credentials['jenkins_url']
+    username = credentials['username']
+    api_token = credentials['api_token']
 
-    setup_vault(password)
-    token = generate_token()
-    save_token(token)
-    click.echo(f"Vault has been set up. Please save this token securely: {token}")
+    job_url = f"{jenkins_url}/job/{job_name}/build"
+    response = requests.post(job_url, auth=(username, api_token))
 
-@vault.command(name="config", help="Configure the vault with password and token.")
-def config_cmd():
-    if not os.path.exists(CONFIG_FILE):
-        print("Vault is not set up. Please use 'vault-setup' to set up the vault first.")
-        return
+    if response.status_code == 201:
+        return f"Job '{job_name}' triggered successfully."
+    else:
+        return f"Failed to trigger job '{job_name}'. Status code: {response.status_code}\n{response.text}"
 
-    password = getpass("Password: ")
-    token = getpass("Token: ")
-    saved_token = load_token()
+@cli.command(name="create-jenkins-job", help="Create a Jenkins job with a specified Jenkinsfile.")
+@click.argument('job_name')
+@click.argument('jenkinsfile_path', type=click.Path(exists=True))
+def create_jenkins_job_command(job_name, jenkinsfile_path):
+    result = create_jenkins_job(job_name, jenkinsfile_path)
+    click.echo(result)
 
-    if token != saved_token:
-        print("Invalid token.")
-        return
+@cli.command(name="trigger-jenkins-job", help="Trigger a Jenkins job.")
+@click.argument('job_name')
+def trigger_jenkins_job_command(job_name):
+    result = trigger_jenkins_job(job_name)
+    click.echo(result)
 
-    salt = urlsafe_b64decode(load_config()["salt"].encode('utf-8'))
-    key = get_key(password, salt)
-    click.echo("Vault configured successfully.")
 
-@vault.command(name="move", help="Move a file to the vault and encrypt it.")
-@click.argument('file_path')
-def move_cmd(file_path):
-    config = load_config()
-    if not config:
-        print("Vault is not set up.")
-        return
 
-    salt = urlsafe_b64decode(config["salt"].encode('utf-8'))
-    password = getpass("Password: ")
-    token = getpass("Token: ")
-    saved_token = load_token()
 
-    if token != saved_token:
-        print("Invalid token.")
-        return
 
-    key = get_key(password, salt)
-    move_to_vault(file_path, key)
 
-@vault.command(name="pull", help="Pull a file from the vault and decrypt it.")
-@click.argument('file_name')
-def pull_cmd(file_name):
-    config = load_config()
-    if not config:
-        print("Vault is not set up.")
-        return
-
-    salt = urlsafe_b64decode(config["salt"].encode('utf-8'))
-    password = getpass("Password: ")
-    token = getpass("Token: ")
-    saved_token = load_token()
-
-    if token != saved_token:
-        print("Invalid token.")
-        return
-
-    key = get_key(password, salt)
-    pull_from_vault(file_name, key)
-
-@vault.command(name="show", help="Show files in the vault.")
-def show_cmd():
-    show_files()
-
-@vault.command(name="encrypt", help="Encrypt a file.")
-@click.argument('file_path')
-def encrypt_cmd(file_path):
-    config = load_config()
-    if not config:
-        print("Vault is not set up.")
-        return
-
-    salt = urlsafe_b64decode(config["salt"].encode('utf-8'))
-    password = getpass("Password: ")
-    key = get_key(password, salt)
-    encrypt_file(file_path, key)
-    print(f"File {file_path} has been encrypted.")
-
-@vault.command(name="decrypt", help="Decrypt a file.")
-@click.argument('file_path')
-def decrypt_cmd(file_path):
-    config = load_config()
-    if not config:
-        print("Vault is not set up.")
-        return
-
-    salt = urlsafe_b64decode(config["salt"].encode('utf-8'))
-    password = getpass("Password: ")
-    key = get_key(password, salt)
-    decrypt_file(file_path, key)
-    print(f"File {file_path} has been decrypted.")
 
 cli.add_command(vault)
 
@@ -1188,5 +1886,9 @@ if __name__ == '__main__':
     cli.add_command(delete_worker)
     cli.add_command(configure_aws)
     cli.add_command(system_monitor)
-    
+    cli.add_command(configure_jenkins)
+    cli.add_command(jenkins_job)
+    cli.add_command(create_jenkins_job_command)
+
     cli()
+    app.run(debug=True)

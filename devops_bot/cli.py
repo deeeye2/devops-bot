@@ -623,7 +623,7 @@ def screenplay(ctx, screenplay, identifier, username, command):
                         if resource.get('monitoring') is not None:
                             ec2_params['Monitoring'] = {'Enabled': resource['monitoring']}
                         if resource.get('instance_initiated_shutdown_behavior'):
-                            ec2_params['InstanceInitiatedShutdownBehavior'] = resource['instance_initiated_shutdown_behavior']}
+                            ec2_params['InstanceInitiatedShutdownBehavior'] = resource['instance_initiated_shutdown_behavior']
                         if resource.get('private_ip_address'):
                             ec2_params['PrivateIpAddress'] = resource['private_ip_address']
                         if resource.get('user_data'):
